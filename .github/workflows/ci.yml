@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: syntax check
+        run: python3 -m py_compile server.py
+
+      - name: build image
+        run: docker build -t reap-range .
+
+      - name: run container
+        run: docker run -d --rm --name reap-range -p 8080:8080 -p 8090:8090 reap-range
+
+      - name: wait for listeners
+        run: |
+          for i in $(seq 1 20); do
+            curl -sf http://127.0.0.1:8080/ && curl -sf http://127.0.0.1:8090/ && exit 0
+            sleep 0.5
+          done
+          echo "listeners never came up" >&2
+          docker logs reap-range || true
+          exit 1
+
+      - name: bad target responds to initialize
+        run: |
+          curl -sf -X POST http://127.0.0.1:8080/mcp \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | grep -q '"protocolVersion"'
+
+      - name: good target gates tools/list without auth
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8090/mcp \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
+          test "$status" = "401"
+
+      - name: stop container
+        if: always()
+        run: docker rm -f reap-range || true
